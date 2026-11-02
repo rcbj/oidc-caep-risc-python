@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+name: publish
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # The test workflow has already succeeded for this commit on main.
+    # Publish only when that commit is a pull request merged into main.
+    # A direct push stays unpublished. The checkout is the commit the
+    # tests ran, and a version already on PyPI is left there.
+    #
+    # There is no API token. PyPI Trusted Publishing trades this job's
+    # GitHub OIDC token for a short-lived upload token. PyPI must hold a
+    # publisher for this repository, publish.yml and the environment
+    # pypi.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oidc-caep-risc/
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Require a pull request merged into main
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          count=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" \
+            --jq '[.[] | select(.base.ref == "main" and .merged_at != null)] | length')
+          if [ "$count" = "0" ]; then
+            echo "This commit on main did not come from a merged pull request."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Build the sdist and the wheel
+        id: build
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, tomllib, urllib.error, urllib.request
+          project = tomllib.load(open("pyproject.toml", "rb"))["project"]
+          name, version = project["name"], project["version"]
+          url = "https://pypi.org/pypi/%s/%s/json" % (name, version)
+          try:
+              urllib.request.urlopen(url)
+              exists = True
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  raise SystemExit("PyPI returned %d for %s %s" % (e.code, name, version))
+              exists = False
+          if exists:
+              print("%s %s is already on PyPI." % (name, version))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("upload=%s\n" % ("false" if exists else "true"))
+          PY
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            python:3.11-slim \
+            sh -c 'pip install --no-cache-dir --quiet build twine && python -m build --outdir dist && twine check --strict dist/*'
+          ls -l dist
+
+      - name: Upload to PyPI
+        if: steps.build.outputs.upload == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
