@@ -61,3 +61,10 @@ def test_the_script_has_no_line_that_prints_a_generated_password():
     for line in source.splitlines():
         if "print(" in line:
             assert "['password']" not in line and '["password"]' not in line, line
+
+
+def test_the_plan_never_holds_the_client_secret():
+    files = configure_iya_sts.files_of(str(ROOT / "demo" / "oidc.json"), None)
+    plan = configure_iya_sts.plan_for(files, "https://sts.example", "demo-user")
+    assert all("oauthClientSecret" not in str(call) for call in plan)
+    assert any(call["when"] == "create" for call in plan)
