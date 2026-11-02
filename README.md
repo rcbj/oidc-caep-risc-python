@@ -38,7 +38,7 @@ The tests build an in-process stub provider and a stub transmitter. They do not 
 | `src/oidc_caep_risc` | The library. `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `config.py`, `ssf/`. |
 | `tests` | pytest ports of the Node relying-party and Shared Signals tests. |
 | `demo` | `demo/app.py`, a stdlib `http.server` application. Config is `demo/oidc.json`. |
-| `scripts/configure_iya_sts.py` | Registers the confidential client on iya-sts. Loopback redirects follow the running container's `PORT`, then the shell `PORT`. |
+| `scripts/configure_iya_sts.py` | Registers the confidential client on iya-sts and creates the test user `oidc-demo-user`. A generated client secret goes to the file `secretFile` names, and a generated password to `demo/generated/oidc-demo-user.password`, each mode 0600; the script prints neither. Loopback redirects follow the running container's `PORT`, then the shell `PORT`. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose uses host networking. |
 
 ## The iya-sts trust chain (`tlsCa`)
