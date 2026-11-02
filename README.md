@@ -4,7 +4,7 @@ A confidential OpenID Connect relying party for a traditional Python application
 
 JSON configuration keys are the same names the Node library `oidc-caep-risc-nodejs` reads. `signals` omitted or `true` keeps CAEP and RISC on. `signals: false` does not start the receiver, does not require transmitter metadata, and drops `ssf.read` and `ssf.manage` from the scope list after the default scopes are applied. `DEFAULT_SCOPES` still names those two scopes. The shipped demo leaves `signals` on (the key is omitted).
 
-The license is MIT. `develop` and `main` are the same commit. Publishing to PyPI is not set up yet.
+The license is MIT. `develop` and `main` are the same commit. A pull request merged into `main` publishes the package to PyPI after the test workflow succeeds on that commit. A direct push does not. There is no API token: PyPI Trusted Publishing trades the workflow's GitHub OIDC token for a short-lived upload token, from the `pypi` environment, and PyPI holds the publisher for this repository and `publish.yml`. A version already on PyPI stays there; the next release is a new `version` in `pyproject.toml` (and `VERSION`).
 
 ## Usage
 
@@ -38,7 +38,7 @@ The tests build an in-process stub provider and a stub transmitter. They do not 
 | `src/oidc_caep_risc` | The library. `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `config.py`, `ssf/`. |
 | `tests` | pytest ports of the Node relying-party and Shared Signals tests. |
 | `demo` | `demo/app.py`, a stdlib `http.server` application. Config is `demo/oidc.json`. |
-| `scripts/configure_iya_sts.py` | Registers the confidential client on iya-sts. Loopback redirects follow the running container's `PORT`, then the shell `PORT`. |
+| `scripts/configure_iya_sts.py` | Registers the confidential client on iya-sts and creates the test user `oidc-demo-user`. A generated client secret goes to the file `secretFile` names, and a generated password to `demo/generated/oidc-demo-user.password`, each mode 0600; the script prints neither. Loopback redirects follow the running container's `PORT`, then the shell `PORT`. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose uses host networking. |
 
 ## The iya-sts trust chain (`tlsCa`)

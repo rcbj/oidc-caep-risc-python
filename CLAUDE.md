@@ -4,7 +4,7 @@ A confidential OpenID Connect relying party for a traditional Python application
 
 `signals` defaults to on. `signals: false` turns CAEP and RISC off: the receiver does not start, transmitter metadata is not required, and the authorization request does not include `ssf.read` or `ssf.manage`. `DEFAULT_SCOPES` still names those two scopes. They are removed after that default is applied. The shipped demo omits `signals`, so they stay on.
 
-The license is the MIT License in `LICENSE`. Publishing to PyPI is not set up yet. `develop` and `main` are the same commit.
+The license is the MIT License in `LICENSE`. A pull request merged into `main` publishes the package to PyPI after the test workflow succeeds on that commit. A direct push does not. There is no API token: PyPI Trusted Publishing trades the workflow's GitHub OIDC token for a short-lived upload token, from the `pypi` environment, and PyPI holds the publisher for this repository and `publish.yml`. A version already on PyPI stays there; the next release is a new `version` in `pyproject.toml` (and `VERSION`). `develop` and `main` are the same commit.
 
 Python 3.11 or later. The dependency is `cryptography`.
 
@@ -15,7 +15,7 @@ Python 3.11 or later. The dependency is `cryptography`.
 | `src/oidc_caep_risc` | The library. Source is `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `ssf/`. |
 | `tests` | pytest. A stub provider and a stub transmitter. `test_trust_chain.py`: the install script writes the whole chain to `tlsCa`'s path, and the library trusts an HTTPS provider through that file. |
 | `demo` | `demo/app.py` and `demo/public/`. Config is `demo/oidc.json`. |
-| `scripts` | `configure_iya_sts.py` registers the confidential client and writes the listener CA trust chain to the file `tlsCa` names. `trust_chain.py` holds `save_trust_chain()` and refreshes that file. |
+| `scripts` | `configure_iya_sts.py` registers the confidential client and writes the listener CA trust chain to the file `tlsCa` names. `trust_chain.py` holds `save_trust_chain()` and refreshes that file. Scripts never print a secret: a generated password goes to `demo/generated/<user>.password` and the client secret to `secretFile`'s file, each created 0600; no trace line carries a URL or value derived from a password; secrets reach `docker run` as `-e NAME`; every `ssl.SSLContext` sets `minimum_version = TLSv1_2`. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose uses host networking. |
 
 ## Usage

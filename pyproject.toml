@@ -5,7 +5,8 @@ name = "oidc-caep-risc"
 version = "0.1.0"
 description = "Server-side OpenID Connect confidential client: Authorization Code with PKCE, client authentication, and a CAEP and RISC Shared Signals receiver."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Iya CyberSecurity Solutions, LLC" }]
 dependencies = ["cryptography"]
@@ -17,7 +18,7 @@ dev = ["pytest"]
 oidc-caep-risc = "oidc_caep_risc.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -25,3 +26,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[project.urls]
+Homepage = "https://github.com/rcbj/oidc-caep-risc-python"
+Repository = "https://github.com/rcbj/oidc-caep-risc-python"
+Issues = "https://github.com/rcbj/oidc-caep-risc-python/issues"
