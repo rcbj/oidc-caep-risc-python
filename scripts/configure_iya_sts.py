@@ -507,6 +507,8 @@ def main(argv=None):
     print(f"metadata:  {files['metadataUrl']}")
     print(f"redirect:  {files['redirectUri']}")
     print(f"auth:      {files['tokenEndpointAuthMethod']}")
+    if files.get("tlsCa"):
+        print("The demo image build copies that trust chain in. Rebuild it after running this against another iya-sts.")
     print("Done. Start the demo with: docker compose up --build")
 
 
