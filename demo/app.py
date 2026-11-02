@@ -3,6 +3,8 @@
 """Demo: a server-rendered confidential OpenID Connect client.
 
 GET /healthz, GET /, GET /login, GET /callback, POST /logout.
+GET /live-status is JSON: whether this process is signed in, and the Shared
+Signals events it has accepted.
 """
 
 import argparse
@@ -31,6 +33,7 @@ SECRET = os.environ["SESSION_SECRET"].encode() if os.environ.get("SESSION_SECRET
 SESSIONS = {}
 PENDING = {}
 RECEIVER = {"obj": None, "state": ""}
+EVENTS = []
 
 
 def _mac(value):
@@ -160,6 +163,8 @@ class Demo(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == "/healthz":
                 return self._send(200, "ok", "text/plain")
+            if path == "/live-status" and method == "GET":
+                return self._live_status()
             if path == "/styles.css":
                 return self._send(200, STYLES, "text/css; charset=utf-8")
             if path == "/app.js":
@@ -210,6 +215,25 @@ class Demo(BaseHTTPRequestHandler):
         problem_html = f"<p class=\"problem\">{_esc(problem)}</p>" if problem else ""
         body = f"<h1>Sign in with OpenID Connect</h1>{problem_html}<p>This application is a confidential client{issuer}. It sends the browser to the authorization endpoint (Authorization Code, PKCE S256) and takes the tokens on the back channel.</p><p class=\"buttons\"><a class=\"button primary\" href=\"/login\">Sign in with OpenID Connect</a></p>"
         return self._send(200, _page("Sign in", body))
+
+    def _live_status(self):
+        try:
+            self._rp()
+        except Exception as err:
+            if not RECEIVER["state"]:
+                RECEIVER["state"] = f"not running: {err}"
+        _sid, session = self._session()
+        login = session["login"] if session else None
+        subject = None
+        if login:
+            subject = login.get("preferred_username") or login.get("email") or login.get("subject")
+        body = {
+            "signedIn": bool(session),
+            "subject": subject,
+            "receiver": RECEIVER["state"],
+            "events": list(EVENTS),
+        }
+        return self._send(200, json.dumps(body), "application/json")
 
     def _login(self):
         rp = self._rp()
@@ -310,6 +334,7 @@ def _start_receiver(rp):
         poll_interval_ms=ssf.get("pollIntervalMs") or 5000,
         on_end_sessions=lambda ids, event: _end_many(ids),
     )
+    receiver.on("*", _remember_event)
     RECEIVER["obj"] = receiver
     try:
         receiver.start()
@@ -318,6 +343,10 @@ def _start_receiver(rp):
         RECEIVER["obj"] = None
         RECEIVER["state"] = f"not running: {err}"
         print(f"ssf: the receiver did not start: {err}", file=sys.stderr)
+
+
+def _remember_event(event):
+    EVENTS.append({"type": event.get("type"), "jti": event.get("jti")})
 
 
 def _end_many(ids):

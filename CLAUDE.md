@@ -13,7 +13,7 @@ Python 3.11 or later. The dependency is `cryptography`.
 | Path | What it is |
 |---|---|
 | `src/oidc_caep_risc` | The library. Source is `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `ssf/`. |
-| `tests` | pytest. A stub provider and a stub transmitter. No live iya-sts. |
+| `tests` | pytest. A stub provider and a stub transmitter. |
 | `demo` | `demo/app.py` and `demo/public/`. Config is `demo/oidc.json`. |
 | `scripts` | `configure_iya_sts.py` registers the confidential client. `trust_chain.py` refreshes the listener CA file named by `tlsCa`. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose uses host networking. |
@@ -36,7 +36,9 @@ Keep the transaction (`state`, nonce, code verifier) until the browser returns. 
 docker build --target test .
 ```
 
-The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command on every push. Do not run pytest on the host. The demo image does not run the suite.
+
+`python3 scripts/live_iya_sts.py` starts iya-sts from the latest main branch in memory mode, registers the demo, signs in, and checks two Shared Signals events on `GET /live-status`. The nightly workflow runs both halves. It does not bind port 3000 or 8081.
 
 ## Demo
 
@@ -46,7 +48,7 @@ The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python
 docker compose up --build
 ```
 
-`GET /healthz` returns `ok`. `GET /` is the page. `GET /login` redirects to the provider. `GET /callback` completes the sign-in. `POST /logout` ends the local session.
+`GET /healthz` returns `ok`. `GET /` is the page. `GET /login` redirects to the provider. `GET /callback` completes the sign-in. `POST /logout` ends the local session. `GET /live-status` reports the sign-in and the Shared Signals events this process has accepted.
 
 A loopback redirect follows `PORT` in the running server and in `scripts/configure_iya_sts.py`. Any other host is left as written. An explicit `--public-url` or a non-empty `PUBLIC_URL` replaces the origin and keeps the path. The running container's `PORT` wins over the shell's when the script registers the application. `pollIntervalMs` is a millisecond pause, not a port.
 
