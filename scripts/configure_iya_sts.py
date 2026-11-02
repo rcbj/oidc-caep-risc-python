@@ -222,10 +222,14 @@ def realm_of(idp):
     return {"origin": origin, "base": f"{origin}{path}"}
 
 
-def application_fields(files, client_secret):
+def application_fields(files):
+    """The application's fields, without its client secret.
+
+    The secret is added to the create call only as it is sent (main()), so the plan, which
+    --dry-run prints and errors quote, never holds it.
+    """
     return {
         "oauthClientId": files["clientId"],
-        "oauthClientSecret": client_secret,
         "oauthRedirectUri": [files["redirectUri"]],
         "oauthPostLogoutRedirectUri": [files["postLogoutRedirectUri"]],
         "oauthResponseType": ["code"],
@@ -245,8 +249,8 @@ def user_attributes(username):
     }
 
 
-def plan_for(files, base, test_user, client_secret):
-    fields = application_fields(files, client_secret)
+def plan_for(files, base, test_user):
+    fields = application_fields(files)
     calls = [{
         "method": "POST",
         "path": f"{base}/admin-api/applications/create",
@@ -268,8 +272,6 @@ def plan_for(files, base, test_user, client_secret):
             "body": {"application": files["clientId"], "attribute": "appAllowedProtocol", "value": protocol},
         })
     for attribute, raw in fields.items():
-        if attribute == "oauthClientSecret":
-            continue
         values = [str(item) for item in raw] if isinstance(raw, list) else [str(raw)]
         for value in values:
             calls.append({
@@ -429,9 +431,9 @@ def main(argv=None):
             print(f"# would write a new client secret (mode 0600) to the file secretFile names in {args['config']}")
         else:
             print(f"# would keep the client secret in the file secretFile names in {args['config']}")
-        # The plan is built with a placeholder, never the secret on disk: nothing printed
-        # here is derived from it.
-        for call in plan_for(files, base, args["testUser"], "<client secret>"):
+        # The plan holds no client secret, so nothing printed here is derived from one.
+        print("# the create call also sends the client secret as oauthClientSecret (not shown)")
+        for call in plan_for(files, base, args["testUser"]):
             printed = json.dumps(call.get("body") or {}, indent=2)
             print(f"{call['method']} {call['path']}  # {call['when']}: {call['why']}\n{printed}")
         return
@@ -459,9 +461,11 @@ def main(argv=None):
 
     minted = not on_disk
     secret = on_disk or __import__("secrets").token_urlsafe(32)
-    plan = plan_for(files, base, args["testUser"], secret)
+    plan = plan_for(files, base, args["testUser"])
     create = next(call for call in plan if call["when"] == "create")
-    created = api("/applications/create", create["body"])
+    # The secret joins a copy of the create body as it is sent; the plan never holds it.
+    sent = dict(create["body"], fields=dict(create["body"]["fields"], oauthClientSecret=secret))
+    created = api("/applications/create", sent)
     fresh = False
     if created["body"].get("ok"):
         fresh = True
