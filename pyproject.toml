@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+[project]
+name = "oidc-caep-risc"
+version = "0.1.0"
+description = "Server-side OpenID Connect confidential client: Authorization Code with PKCE, client authentication, and a CAEP and RISC Shared Signals receiver."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Iya CyberSecurity Solutions, LLC" }]
+dependencies = ["cryptography"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+oidc-caep-risc = "oidc_caep_risc.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
