@@ -107,6 +107,7 @@ def provider():
         chain_file.write_text("".join(_pem(cert) for cert in (leaf, issuing, intermediate)), encoding="utf-8")
         key_file.write_bytes(keys[3].private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(chain_file), str(key_file))
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         server.socket = context.wrap_socket(server.socket, server_side=True)

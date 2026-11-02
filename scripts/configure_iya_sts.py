@@ -9,7 +9,6 @@ The default http://localhost:3000 is not an explicit public URL.
 
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -42,8 +41,9 @@ def usage():
                   (default: unset; $PUBLIC_URL). Without it, a loopback redirect follows the
                   running demo's PORT, then $PORT. A non-loopback redirect is left as written.
   --test-user     The test user to create (default: oidc-demo-user). Its password is
-                  $OIDC_DEMO_USER_PASSWORD, or one is generated and printed once. With that variable
-                  set, an existing user's password is replaced.
+                  $OIDC_DEMO_USER_PASSWORD, or one is generated and written to
+                  demo/generated/<user>.password (mode 0600); only the path is printed.
+                  With $OIDC_DEMO_USER_PASSWORD set, an existing user's password is replaced.
   --no-test-user  Do not create a test user.
   --dry-run       Print what would be done, and send nothing. Does not write a secret.
 
@@ -350,10 +350,30 @@ def _mint_admin_token(base, ca, secret):
     return reply["body"]["access_token"]
 
 
-def _write_secret(path, secret):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(f"{secret}\n", encoding="utf-8")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+def generated_file(directory, username):
+    """The file a generated test-user password is written to: <directory>/<username>.password.
+
+    Computed apart from the password, so the path the script prints is not derived from it.
+    """
+    if not username or "/" in username or "\\" in username or username in (".", ".."):
+        raise ValueError(f"{username!r} cannot name a file")
+    return Path(directory) / f"{username}.password"
+
+
+def write_private(path, text):
+    """Write text to path, readable and writable by its owner only (0600).
+
+    The file is created 0600, so it is never readable by anyone else, not even for a moment;
+    an existing file is narrowed to 0600 before it is rewritten. A generated password goes
+    here and is never printed: a password does not belong in a log. demo/generated, beside
+    the client key, never enters an image.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as out:
+        os.fchmod(out.fileno(), 0o600)
+        out.write(text + "\n")
 
 
 def container_port(cwd=None):
@@ -406,12 +426,13 @@ def main(argv=None):
         if files.get("tlsCa"):
             print(f"# would save {origin}'s listener CA trust chain to {files['tlsCa']}")
         if not on_disk:
-            print(f"# would write a new client secret to {files['secretFile']} (mode 0600)")
+            print(f"# would write a new client secret (mode 0600) to the file secretFile names in {args['config']}")
         else:
-            print(f"# would keep the client secret at {files['secretFile']}")
-        placeholder = on_disk or "<a new client secret>"
-        for call in plan_for(files, base, args["testUser"], placeholder):
-            printed = json.dumps(call.get("body") or {}, indent=2).replace(placeholder, "<client secret>")
+            print(f"# would keep the client secret in the file secretFile names in {args['config']}")
+        # The plan is built with a placeholder, never the secret on disk: nothing printed
+        # here is derived from it.
+        for call in plan_for(files, base, args["testUser"], "<client secret>"):
+            printed = json.dumps(call.get("body") or {}, indent=2)
             print(f"{call['method']} {call['path']}  # {call['when']}: {call['why']}\n{printed}")
         return
     ca = None
@@ -445,8 +466,8 @@ def main(argv=None):
     if created["body"].get("ok"):
         fresh = True
         if minted:
-            _write_secret(files["secretFile"], secret)
-        print(f"Registered {files['clientId']}. The client secret is {files['secretFile']}.")
+            write_private(files["secretFile"], secret)
+        print(f"Registered {files['clientId']}. Its client secret is in the file secretFile names in {args['config']} (mode 0600).")
     elif any("already in this registry" in item.lower() or "already in this registry" in item for item in _errors_of(created["body"])):
         if minted:
             raise RuntimeError(f"{files['clientId']} already exists, and {files['secretFile']} is missing. This script does not rotate the client secret. Restore that file, or set a new secret on the application, then re-run.")
@@ -494,7 +515,9 @@ def main(argv=None):
                 raise RuntimeError(f"creating {args['testUser']} was refused: {json.dumps(made['body'])[:300]}")
             print(f"Created user {args['testUser']}.")
             if made["body"].get("password"):
-                print(f"Generated password for {args['testUser']} (shown once): {made['body']['password']}")
+                saved = generated_file(Path(args["config"]).resolve().parent / "generated", args["testUser"])
+                write_private(saved, made["body"]["password"])
+                print(f"Generated a password for {args['testUser']}; it is in {saved} (readable by you only).")
         for call in plan:
             if not call["path"].endswith("/groups/add-member"):
                 continue
