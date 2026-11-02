@@ -1,5 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
 # SPDX-License-Identifier: MIT
+# `docker build --target test` runs the suite in this image.
+# The demo image below does not run it.
+FROM python:3.11-slim AS test
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE VERSION ./
+COPY src src
+COPY tests tests
+COPY scripts scripts
+RUN pip install --no-cache-dir ".[dev]" && pytest
+
 FROM python:3.11-slim
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE VERSION ./

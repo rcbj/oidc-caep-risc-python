@@ -8,12 +8,6 @@ The license is MIT. `develop` and `main` are the same commit. Publishing to PyPI
 
 ## Usage
 
-```sh
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev]"
-```
-
 ```python
 from oidc_caep_risc import RelyingParty
 
@@ -27,9 +21,11 @@ Tokens stay in this process. Keep the transaction until the browser returns.
 
 ## Tests
 
-```sh
-pytest
+```bash
+docker build --target test .
 ```
+
+The suite runs in a container.
 
 The tests build an in-process stub provider and a stub transmitter. They do not need a live iya-sts.
 
@@ -48,7 +44,7 @@ The tests build an in-process stub provider and a stub transmitter. They do not 
 `PORT` defaults to 3000. A loopback redirect and post-logout URL follow `PORT`. Any other host is left as written. An explicit `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. The default `http://localhost:3000` is not an explicit public URL.
 
 ```sh
-python demo/app.py
+docker compose up --build
 ```
 
 `GET /healthz` returns `ok`. `GET /` is the page. `GET /login` starts `authorize` and redirects. `GET /callback` completes the code exchange. `POST /logout` signs the local session out.

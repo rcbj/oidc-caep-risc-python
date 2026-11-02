@@ -20,12 +20,6 @@ Python 3.11 or later. The dependency is `cryptography`.
 
 ## Usage
 
-```sh
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev]"
-```
-
 ```python
 from oidc_caep_risc import RelyingParty, OidcError
 
@@ -38,17 +32,18 @@ Keep the transaction (`state`, nonce, code verifier) until the browser returns. 
 
 ## Tests
 
-```sh
-pip install -e ".[dev]"
-pytest
+```bash
+docker build --target test .
 ```
+
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
 
 ## Demo
 
 `docker-compose.yml` sets `network_mode: host`. The process binds `PORT`, default 3000. `ENV PORT=3000` in the image keeps an unset value on 3000, and the health check calls `http://127.0.0.1:${PORT}/healthz`.
 
 ```sh
-python demo/app.py
+docker compose up --build
 ```
 
 `GET /healthz` returns `ok`. `GET /` is the page. `GET /login` redirects to the provider. `GET /callback` completes the sign-in. `POST /logout` ends the local session.
