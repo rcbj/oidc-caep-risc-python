@@ -14,9 +14,11 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from oidc_caep_risc import EVENT, OidcError, SignalsReceiver, subject_of
+from oidc_caep_risc import EVENT, OidcError, RelyingParty, SignalsReceiver, subject_of
 from oidc_caep_risc.b64 import b64url_encode
 from oidc_caep_risc.ssf.jws import verify_compact_jws
+
+from test_rp import check_proof
 
 _PRIVATE = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _OTHER = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -52,17 +54,19 @@ def _start_transmitter():
     acked = []
     errs = {}
     streams = []
-    state = {"created": 0, "authorization": "", "base": ""}
+    state = {"created": 0, "authorization": "", "base": "", "dpop": False, "jkt": None, "rs_nonce": None, "proofs": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             return
 
-        def _out(self, status, body=None):
+        def _out(self, status, body=None, headers=None):
             raw = b"" if body is None else json.dumps(body).encode()
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(raw)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if raw:
                 self.wfile.write(raw)
@@ -72,7 +76,27 @@ def _start_transmitter():
             text = self.rfile.read(length).decode() if length else ""
             state["authorization"] = self.headers.get("authorization") or ""
             path = urlsplit(self.path).path
-            if state["authorization"] != "Bearer app-token" and path != "/.well-known/ssf-configuration" and not path.startswith("/jwks"):
+            if path == "/token" and self.command == "POST":
+                # The authorization server half, for a DPoP-bound client-credentials token.
+                proof = check_proof(self.headers.get("dpop"), "POST", f"{state['base']}/token")
+                state["jkt"] = proof["jkt"]
+                return self._out(200, {"access_token": "app-token", "token_type": "DPoP", "expires_in": 300})
+            if state["dpop"]:
+                if state["authorization"] != "DPoP app-token":
+                    return self._out(401, {"error": "invalid_token"})
+                try:
+                    proof = check_proof(self.headers.get("dpop") or "", self.command, f"{state['base']}{path}", "app-token")
+                except (AssertionError, Exception) as err:
+                    return self._out(401, {"error": "invalid_dpop_proof", "error_description": str(err)})
+                state["proofs"].append(proof)
+                if proof["jkt"] != state["jkt"]:
+                    return self._out(401, {"error": "invalid_dpop_proof"})
+                if state["rs_nonce"] and proof["payload"].get("nonce") != state["rs_nonce"]:
+                    return self._out(401, {"error": "use_dpop_nonce"}, {
+                        "WWW-Authenticate": 'DPoP error="use_dpop_nonce"',
+                        "DPoP-Nonce": state["rs_nonce"],
+                    })
+            elif state["authorization"] != "Bearer app-token" and path != "/.well-known/ssf-configuration" and not path.startswith("/jwks"):
                 return self._out(401, {"error": "invalid_token"})
             base = state["base"]
             if path == "/.well-known/ssf-configuration":
@@ -243,3 +267,71 @@ def test_polls_and_ends_only_the_named_session(stub):
 
 def test_oidc_error_is_exported():
     assert OidcError is not None
+
+
+class _Quiet:
+    def info(self, message):
+        return None
+
+    def warn(self, message):
+        return None
+
+    def error(self, message):
+        return None
+
+
+def test_calls_the_transmitter_with_dpop_proofs():
+    stub = _start_transmitter()
+    stub["state"]["dpop"] = True
+    stub["state"]["rs_nonce"] = "ssf-nonce"
+    try:
+        metadata = {
+            "issuer": stub["url"],
+            "authorization_endpoint": f"{stub['url']}/authorize",
+            "token_endpoint": f"{stub['url']}/token",
+            "jwks_uri": f"{stub['url']}/jwks",
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "dpop_signing_alg_values_supported": ["ES256"],
+        }
+        rp = RelyingParty({
+            "clientId": "my-app",
+            "clientSecret": "s",
+            "tokenEndpointAuthMethod": "client_secret_basic",
+            "redirectUri": "http://localhost:3000/callback",
+            "scopes": "openid ssf.manage",
+        }, metadata)
+        assert rp.dpop is not None
+        rp.sessions.set("L-1", {"access_token": "user-token", "token_type": "DPoP"})
+        ended = []
+        receiver = SignalsReceiver(
+            transmitter=stub["url"],
+            relying_party=rp,
+            on_end_sessions=lambda ids, event: ended.append(ids),
+            poll_interval_ms=60_000,
+            log=_Quiet(),
+        )
+        receiver.start()
+        receiver.stop()
+        assert receiver.stream["stream_id"] == "s1"
+        proofs = stub["state"]["proofs"]
+        assert proofs and all(proof["jkt"] == rp.dpop.thumbprint for proof in proofs)
+        # The first proof had no nonce and was retried once; every later one carries it.
+        assert proofs[0]["payload"].get("nonce") is None
+        assert all(proof["payload"].get("nonce") == "ssf-nonce" for proof in proofs[1:])
+        assert all("ath" in proof["payload"] for proof in proofs)
+
+        receiver.track({"local_id": "L-1", "person": "urn:uuid:alice", "idp_session": "IDP-1"})
+        _deliver(stub, EVENT["sessionRevoked"], {
+            "format": "complex",
+            "user": {"format": "iss_sub", "iss": stub["url"], "sub": "urn:uuid:alice"},
+            "session": {"format": "opaque", "id": "IDP-1"},
+        })
+        receiver.poll_once()
+        assert ended == [["L-1"]]
+        # A CAEP session-revoked clears the session's tokens from the relying party's cache.
+        assert rp.session("L-1") is None
+        receiver.verify("x")
+    finally:
+        stub["close"]()

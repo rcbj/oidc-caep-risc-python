@@ -47,6 +47,9 @@ def main(argv=None):
     print(f"scopes:     {config['scopes']}")
     print(f"metadata:   {metadata}")
     print(f"secret:     {'present' if config.get('clientSecret') else 'absent'}")
+    print(f"par:        {config['par']}")
+    print(f"dpop:       {config['dpop']}{' (dpopKey given)' if config.get('dpopKeyPem') else ''}")
+    print(f"id token:   {config.get('idTokenSignedResponseAlg') or ', '.join(config['idTokenSigningAlgs'])}")
     print(f"tls ca:     {'present' if config.get('tlsCa') else 'absent'}")
     print(f"ssf:        {(config.get('ssf') or {}).get('transmitter') or 'not configured'}")
     return 0

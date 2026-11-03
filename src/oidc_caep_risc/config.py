@@ -89,16 +89,95 @@ def _is_loopback(hostname):
     return hostname in ("localhost", "127.0.0.1", "::1", "[::1]")
 
 
-def _check_redirect(value, name, allow_insecure):
+def check_redirect(value, name="redirectUri"):
+    """https, or http on a loopback host (localhost, 127.0.0.1, [::1]). allowInsecure does not relax it."""
     from urllib.parse import urlsplit
-    parts = urlsplit(value)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    if not isinstance(value, str) or not value:
+        raise OidcError("config", f"{name} is required")
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+    except ValueError as err:
+        raise OidcError("config", f"{name} is not a URL: {value}", cause=err) from err
+    if parts.scheme not in ("http", "https") or not hostname:
         raise OidcError("config", f"{name} is not a URL: {value}")
+    if parts.fragment:
+        raise OidcError("config", f"{name} must not carry a fragment: {value}")
     if parts.scheme == "https":
         return value
-    if parts.scheme == "http" and (_is_loopback(parts.hostname) or allow_insecure):
+    if _is_loopback(hostname):
         return value
-    raise OidcError("config", f"{name} must use https, or http on loopback: {value}")
+    raise OidcError("config", f"{name} must use https, or http on a loopback host: {value}")
+
+
+def _mode(doc, name):
+    value = doc.get(name)
+    if value is None:
+        return "auto"
+    if value not in ("auto", "always", "never"):
+        raise OidcError("config", f"{name} must be auto, always, or never")
+    return value
+
+
+def _number(doc, name, default):
+    value = doc.get(name)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise OidcError("config", f"{name} must be a non-negative number of seconds")
+    return value
+
+
+def _acr_values(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        joined = " ".join(str(item).strip() for item in value if str(item).strip())
+    else:
+        joined = " ".join(str(value).split())
+    return joined or None
+
+
+def apply_defaults(doc):
+    """The defaults and rules every client gets, whether it was read from a file or built directly.
+
+    par and dpop default to auto; clockToleranceSec to 30; maxIdTokenAgeSec to 600;
+    idTokenSigningAlgs to ["RS256"]; requireIdTokenTypAndAtHash to true. redirectUri and
+    postLogoutRedirectUri must be https, or http on a loopback host.
+    """
+    out = ResolvedConfig(doc)
+    out["par"] = _mode(doc, "par")
+    out["dpop"] = _mode(doc, "dpop")
+    out["clockToleranceSec"] = _number(doc, "clockToleranceSec", 30)
+    out["maxIdTokenAgeSec"] = _number(doc, "maxIdTokenAgeSec", 600)
+    algs = doc.get("idTokenSigningAlgs")
+    if algs is None:
+        algs = ["RS256"]
+    if not isinstance(algs, list) or not algs or not all(isinstance(alg, str) and alg for alg in algs):
+        raise OidcError("config", "idTokenSigningAlgs must be a non-empty list of algorithm names")
+    if any(alg.lower() == "none" for alg in algs) or str(doc.get("idTokenSignedResponseAlg") or "").lower() == "none":
+        raise OidcError("config", "an unsigned ID token (alg none) is never accepted")
+    out["idTokenSigningAlgs"] = list(algs)
+    require = doc.get("requireIdTokenTypAndAtHash")
+    if require is None:
+        require = True
+    if not isinstance(require, bool):
+        raise OidcError("config", "requireIdTokenTypAndAtHash must be true or false")
+    out["requireIdTokenTypAndAtHash"] = require
+    acr = _acr_values(doc.get("acrValues"))
+    if acr:
+        out["acrValues"] = acr
+    else:
+        out.pop("acrValues", None)
+    if not doc.get("dpopKeyPem") and doc.get("dpopKey"):
+        if not isinstance(doc["dpopKey"], str) or "-----BEGIN" not in doc["dpopKey"]:
+            raise OidcError("config", "dpopKey must be a PEM private key when the client is created directly (a file path is read by resolve_config)")
+        out["dpopKeyPem"] = doc["dpopKey"]
+    out.pop("dpopKey", None)
+    out["redirectUri"] = check_redirect(doc.get("redirectUri"), "redirectUri")
+    if doc.get("postLogoutRedirectUri"):
+        out["postLogoutRedirectUri"] = check_redirect(doc["postLogoutRedirectUri"], "postLogoutRedirectUri")
+    return out
 
 
 def resolve_config(raw, base_dir):
@@ -128,9 +207,6 @@ def resolve_config(raw, base_dir):
         scopes = " ".join(part for part in scopes.split() if part not in ("ssf.read", "ssf.manage"))
     if "openid" not in scopes.split():
         raise OidcError("config", "scopes must include openid")
-    par = doc.get("par") if "par" in doc and doc.get("par") is not None else "auto"
-    if par not in ("auto", "always", "never"):
-        raise OidcError("config", "par must be auto, always, or never")
 
     issuer = str(doc["issuer"]).strip() if doc.get("issuer") else None
     metadata_url = str(doc["metadataUrl"]).strip() if doc.get("metadataUrl") else None
@@ -164,6 +240,10 @@ def resolve_config(raw, base_dir):
     if method_raw == "private_key_jwt" and not private_key_pem:
         raise OidcError("config", "private_key_jwt needs privateKey")
 
+    dpop_key_pem = None
+    if doc.get("dpopKey"):
+        dpop_key_pem = _key_value(str(doc["dpopKey"]), base_dir, "the DPoP key")
+
     tls_ca = _read_trust(doc.get("tlsCa"), base_dir)
     post_raw = doc.get("postLogoutRedirectUri")
     if post_raw is None:
@@ -193,15 +273,18 @@ def resolve_config(raw, base_dir):
         out["privateKeyPem"] = private_key_pem
     out["privateKeyAlg"] = doc.get("privateKeyAlg") or "RS256"
     out["tokenEndpointAuthMethod"] = method_raw
-    out["redirectUri"] = _check_redirect(redirect_uri, "redirectUri", allow_insecure)
+    out["redirectUri"] = redirect_uri
     if post_logout:
-        out["postLogoutRedirectUri"] = _check_redirect(post_logout, "postLogoutRedirectUri", allow_insecure)
+        out["postLogoutRedirectUri"] = post_logout
     out["scopes"] = scopes
     if doc.get("idTokenSignedResponseAlg"):
         out["idTokenSignedResponseAlg"] = doc["idTokenSignedResponseAlg"]
-    out["par"] = par
-    out["clockToleranceSec"] = 30 if doc.get("clockToleranceSec") is None else doc["clockToleranceSec"]
-    out["maxIdTokenAgeSec"] = 600 if doc.get("maxIdTokenAgeSec") is None else doc["maxIdTokenAgeSec"]
+    for name in ("par", "dpop", "clockToleranceSec", "maxIdTokenAgeSec", "idTokenSigningAlgs",
+                 "requireIdTokenTypAndAtHash", "acrValues"):
+        if doc.get(name) is not None:
+            out[name] = doc[name]
+    if dpop_key_pem:
+        out["dpopKeyPem"] = dpop_key_pem
     out["allowInsecure"] = allow_insecure
     if tls_ca:
         out["tlsCa"] = tls_ca
@@ -209,7 +292,7 @@ def resolve_config(raw, base_dir):
         out["signals"] = False
     if ssf:
         out["ssf"] = ssf
-    return out
+    return apply_defaults(out)
 
 
 def read_config_file(path):
