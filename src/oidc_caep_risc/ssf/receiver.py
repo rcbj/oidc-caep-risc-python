@@ -32,7 +32,12 @@ class SignalsReceiver:
     """Finds or creates this application's poll stream and turns events into local sessions."""
 
     def __init__(self, transmitter, on_end_sessions, tls=None, headers=None, events_requested=None,
-                 end_on=None, session_index=None, description=None, poll_interval_ms=5000, max_events=50, log=None):
+                 end_on=None, session_index=None, description=None, poll_interval_ms=5000, max_events=50, log=None,
+                 relying_party=None, scope="ssf.manage"):
+        """relying_party: the RelyingParty whose client-credentials token (scope) authorizes every
+        call to the transmitter. A DPoP-bound token goes with a DPoP proof on each call, and the
+        sessions an event ends are also removed from that client's session token cache. Without
+        it, headers() supplies the authorization."""
         if not callable(on_end_sessions):
             raise OidcError("config", "onEndSessions is required")
         if not re.match(r"https?://", transmitter or ""):
@@ -41,6 +46,8 @@ class SignalsReceiver:
         self._on_end = on_end_sessions
         self._tls = tls or {}
         self._headers = headers
+        self._rp = relying_party
+        self._scope = scope
         self._events_requested = list(events_requested or DEFAULT_EVENTS_REQUESTED)
         self._end_on = list(end_on or DEFAULT_ENDING_EVENTS)
         self._description = description
@@ -87,7 +94,16 @@ class SignalsReceiver:
                 headers.update(extra)
         if body is not None:
             headers["content-type"] = "application/json"
-        answer = send(url, method=method, headers=headers, body=None if body is None else json.dumps(body), tls=self._tls, code="ssf")
+        payload = None if body is None else json.dumps(body)
+        if self._rp is not None:
+            token = self._rp.client_credentials(self._scope)
+            headers.pop("authorization", None)
+            answer = self._rp.resource_request(
+                method, url, token["access_token"], token.get("token_type"),
+                headers=headers, body=payload, code="ssf", tls=self._tls or None,
+            )
+        else:
+            answer = send(url, method=method, headers=headers, body=payload, tls=self._tls, code="ssf")
         parsed = None
         if answer["body"]:
             try:
@@ -297,6 +313,8 @@ class SignalsReceiver:
                 if event["ended"]:
                     for local_id in sessions:
                         self._index.remove(local_id)
+                        if self._rp is not None:
+                            self._rp.forget_session(local_id)
             for handler in list(self._handlers.get(event_type, [])) + list(self._handlers.get("*", [])):
                 try:
                     handler(event)

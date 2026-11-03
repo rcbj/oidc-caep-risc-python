@@ -236,6 +236,9 @@ def application_fields(files):
         "oauthGrantType": list(GRANTS),
         "oauthAllowedScope": files["scopes"],
         "oauthTokenEndpointAuthMethod": files["tokenEndpointAuthMethod"],
+        # The library accepts RS256 ID tokens unless idTokenSigningAlgs widens the list, so the
+        # registration pins the provider to it (id_token_signed_response_alg).
+        "oauthIdTokenSignedResponseAlg": "RS256",
     }
 
 
