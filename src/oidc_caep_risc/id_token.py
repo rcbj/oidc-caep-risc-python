@@ -106,7 +106,11 @@ def _signature_ok(token, alg, jwks, secret):
 
 
 def validate_id_token(token, checks):
-    """Verifies an ID token and returns the payload."""
+    """Verifies an ID token and returns the payload.
+
+    requireTyp: the header must carry typ (JWT or application/jwt). requireAtHash: with
+    accessToken given, at_hash must be present. Without them each is checked when present.
+    """
     try:
         header = _decode_part(token, 0, "header")
     except OidcError:
@@ -118,6 +122,8 @@ def validate_id_token(token, checks):
     if "crit" in header and header["crit"] is not None:
         raise OidcError("validation", "the ID token has a crit header this client does not understand")
     typ = "" if header.get("typ") is None else str(header.get("typ")).lower()
+    if not typ and checks.get("requireTyp"):
+        raise OidcError("validation", "the ID token header has no typ (JWT or application/jwt is required)")
     if typ and ((typ != "jwt" and typ != "application/jwt") or typ in _NOT_ID_TOKEN):
         raise OidcError("validation", f"the ID token typ is {header.get('typ')}, not an ID token")
     if alg.startswith("HS") and not checks.get("clientSecret"):
@@ -148,6 +154,8 @@ def validate_id_token(token, checks):
     if isinstance(nbf, (int, float)) and not isinstance(nbf, bool) and float(nbf) - tolerance > now:
         raise OidcError("validation", "the ID token was refused: nbf is in the future")
     iat = payload.get("iat")
+    if isinstance(iat, (int, float)) and not isinstance(iat, bool) and float(iat) - tolerance > now:
+        raise OidcError("validation", "the ID token was refused: iat is in the future")
     max_age_sec = checks.get("maxIdTokenAgeSec")
     if max_age_sec is not None:
         if not isinstance(iat, (int, float)) or isinstance(iat, bool):
@@ -167,6 +175,8 @@ def validate_id_token(token, checks):
     if checks.get("previousSub") is not None and payload.get("sub") != checks["previousSub"]:
         raise OidcError("validation", "the refreshed ID token is for a different subject")
     if checks.get("accessToken"):
+        if payload.get("at_hash") is None and checks.get("requireAtHash"):
+            raise OidcError("validation", "the token response carries an access token and the ID token has no at_hash")
         _check_hash(payload.get("at_hash"), checks["accessToken"], alg, "at_hash")
     if checks.get("code"):
         _check_hash(payload.get("c_hash"), checks["code"], alg, "c_hash")
@@ -194,6 +204,6 @@ def fetch_jwks(jwks_uri, tls=None):
     return keys
 
 
-def id_token_algorithms(advertised, pinned=None):
+def id_token_algorithms(advertised, pinned=None, allowed=None):
     from .discovery import id_token_algorithms as _impl
-    return _impl(advertised, pinned)
+    return _impl(advertised, pinned, allowed)

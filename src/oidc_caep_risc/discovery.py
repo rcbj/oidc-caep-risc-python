@@ -65,13 +65,18 @@ def validate_provider_metadata(raw, expected_issuer=None):
     for key in ("userinfo_endpoint", "end_session_endpoint", "pushed_authorization_request_endpoint", "revocation_endpoint"):
         if key in raw and raw[key] is not None:
             metadata[key] = _must_be_url(raw[key], key)
-    for key in ("token_endpoint_auth_methods_supported", "code_challenge_methods_supported", "scopes_supported", "grant_types_supported"):
+    for key in (
+        "token_endpoint_auth_methods_supported", "code_challenge_methods_supported", "scopes_supported",
+        "grant_types_supported", "dpop_signing_alg_values_supported",
+    ):
         if key in raw and raw[key] is not None:
             if not isinstance(raw[key], list):
                 raise OidcError("discovery", f"{key} must be an array")
             metadata[key] = [str(item) for item in raw[key]]
     if "authorization_response_iss_parameter_supported" in raw and raw["authorization_response_iss_parameter_supported"] is not None:
         metadata["authorization_response_iss_parameter_supported"] = raw["authorization_response_iss_parameter_supported"] is True
+    if "require_pushed_authorization_requests" in raw and raw["require_pushed_authorization_requests"] is not None:
+        metadata["require_pushed_authorization_requests"] = raw["require_pushed_authorization_requests"] is True
     response_types = metadata["response_types_supported"]
     if not isinstance(response_types, list) or "code" not in [str(item) for item in response_types]:
         raise OidcError("discovery", "OpenID Provider does not support response_type=code")
@@ -113,14 +118,37 @@ def well_known_urls(issuer, suffix):
     return [inserted, appended]
 
 
-def id_token_algorithms(advertised, pinned=None):
-    """The algorithms an ID token from this provider may use."""
-    advertised = list(advertised or [])
+# The ID token algorithm allow-list when the configuration names none.
+DEFAULT_ID_TOKEN_SIGNING_ALGS = ("RS256",)
+
+_SYMMETRIC = ("HS256", "HS384", "HS512")
+
+
+def id_token_algorithms(advertised, pinned=None, allowed=None):
+    """The algorithms an ID token from this provider may use.
+
+    pinned (idTokenSignedResponseAlg) is one algorithm. Otherwise allowed (idTokenSigningAlgs)
+    is the list, RS256 when it is not given. Only algorithms the provider also advertises
+    remain. none is never accepted; HMAC only when named here.
+    """
+    advertised = [str(item) for item in (advertised or [])]
+    wanted = [pinned] if pinned else list(allowed or DEFAULT_ID_TOKEN_SIGNING_ALGS)
+    for alg in wanted:
+        if not isinstance(alg, str) or not alg:
+            raise OidcError("config", "idTokenSigningAlgs must be a list of algorithm names")
+        if alg.lower() == "none":
+            raise OidcError("config", "an unsigned ID token (alg none) is never accepted")
+        if alg not in ASYMMETRIC_JWS_ALGS and alg not in _SYMMETRIC:
+            raise OidcError("config", f"{alg} is not an ID token algorithm this client can verify")
     if pinned:
         if pinned not in advertised:
             raise OidcError("discovery", f"the provider does not advertise id_token alg {pinned}")
         return [pinned]
-    allowed = [alg for alg in advertised if alg in ASYMMETRIC_JWS_ALGS]
-    if not allowed:
-        raise OidcError("discovery", f"none of the provider's ID token algorithms can be verified ({', '.join(advertised)})")
-    return allowed
+    usable = [alg for alg in wanted if alg in advertised]
+    if not usable:
+        raise OidcError(
+            "discovery",
+            f"the provider advertises none of the allowed ID token algorithms "
+            f"({', '.join(wanted)}; it advertises {', '.join(advertised) or 'none'})",
+        )
+    return usable

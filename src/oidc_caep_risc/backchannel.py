@@ -41,7 +41,10 @@ def _ssl_context(tls):
 
 
 def send(url, method="GET", headers=None, body=None, tls=None, code="protocol"):
-    """One HTTP(S) request. Redirects are not followed. The body is capped."""
+    """One HTTP(S) request. Redirects are not followed. The body is capped.
+
+    headers in the answer are the response headers, names lower-cased, repeats joined with ", ".
+    """
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         raise OidcError(code, f"{url} is not an http(s) URL")
@@ -67,7 +70,16 @@ def send(url, method="GET", headers=None, body=None, tls=None, code="protocol"):
         if len(raw) > MAX_BYTES:
             raise OidcError(code, f"{url} answered more than {MAX_BYTES} bytes")
         content_type = response.getheader("content-type") or ""
-        return {"status": response.status, "content_type": content_type, "body": raw.decode("utf-8", "replace")}
+        received = {}
+        for name, value in response.getheaders():
+            key = name.lower()
+            received[key] = f"{received[key]}, {value}" if key in received else value
+        return {
+            "status": response.status,
+            "content_type": content_type,
+            "headers": received,
+            "body": raw.decode("utf-8", "replace"),
+        }
     except OidcError:
         raise
     except socket.timeout as err:

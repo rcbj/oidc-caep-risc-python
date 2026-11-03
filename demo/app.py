@@ -194,7 +194,16 @@ class Demo(BaseHTTPRequestHandler):
             rp = self._rp()
         except Exception as err:
             problem = f"The relying party is not configured yet: {err}. Run scripts/configure_iya_sts.py."
-        if session:
+        if session and rp is not None:
+            sid, _session = self._session()
+            try:
+                # The library's session token cache: the cached access token while it has more
+                # than 30 seconds left, otherwise a refreshed one (with a DPoP proof when bound).
+                token = rp.access_token_for(sid)
+            except OidcError as err:
+                _end_many([sid])
+                body = f"<h1>Signed out</h1><p class=\"problem\">{_esc(err)}</p><p><a href=\"/\">Sign in again</a></p>"
+                return self._send(200, _page("Signed out", body), cookies=[self._cookie("oidc_session", "", max_age=0)])
             login = session["login"]
             who = login.get("preferred_username") or login.get("email") or login.get("subject")
             rows = "".join(
@@ -205,9 +214,10 @@ class Demo(BaseHTTPRequestHandler):
                     ("Email", login.get("email")),
                     ("Name", login.get("name")),
                     ("Username", login.get("preferred_username")),
+                    ("Access token", f"{token.get('token_type')}-bound" if str(token.get("token_type")).lower() == "dpop" else token.get("token_type")),
                 ) if value
             )
-            body = f"<h1>Signed in as {_esc(who)}</h1><table class=\"facts\">{rows}</table><p><small>The access token and the refresh token stay in this process. This page does not show them.</small></p><p><small>Shared Signals: {_esc(RECEIVER['state'])}</small></p><form method=\"post\" action=\"/logout\"><button type=\"submit\">Sign out</button></form>"
+            body = f"<h1>Signed in as {_esc(who)}</h1><table class=\"facts\">{rows}</table><p><small>The access token and the refresh token stay in this process, in the relying party's session token cache. This page does not show them.</small></p><p><small>Shared Signals: {_esc(RECEIVER['state'])}</small></p><form method=\"post\" action=\"/logout\"><button type=\"submit\">Sign out</button></form>"
             return self._send(200, _page("Signed in", body))
         issuer = ""
         if rp:
@@ -227,9 +237,11 @@ class Demo(BaseHTTPRequestHandler):
         subject = None
         if login:
             subject = login.get("preferred_username") or login.get("email") or login.get("subject")
+        cached = Demo.rp.session(_sid) if (session and Demo.rp is not None) else None
         body = {
             "signedIn": bool(session),
             "subject": subject,
+            "tokenType": cached.get("token_type") if cached else None,
             "receiver": RECEIVER["state"],
             "events": list(EVENTS),
         }
@@ -238,7 +250,11 @@ class Demo(BaseHTTPRequestHandler):
     def _login(self):
         rp = self._rp()
         request = rp.authorize()
-        txn = {key: request[key] for key in ("state", "nonce", "code_verifier", "redirect_uri") if key in request}
+        txn = {
+            key: request[key]
+            for key in ("state", "nonce", "code_verifier", "redirect_uri", "acr_values", "max_age", "expected_sub")
+            if key in request
+        }
         cookie = self._cookie("oidc_txn", _seal(txn), path="/callback", max_age=600)
         self._redirect(302, request["url"], cookies=[cookie])
 
@@ -250,9 +266,12 @@ class Demo(BaseHTTPRequestHandler):
         try:
             if not txn:
                 raise OidcError("validation", "this callback is not a sign-in this browser started")
-            login = rp.complete(query, txn)
             sid = secrets.token_urlsafe(32)
-            SESSIONS[sid] = {"login": login, "expires": __import__("time").time() + 8 * 3600}
+            # The tokens go into the library's session token cache under sid; this page keeps
+            # only what it shows.
+            login = rp.complete(query, txn, session_id=sid)
+            shown = {key: login[key] for key in ("subject", "issuer", "email", "name", "preferred_username") if login.get(key)}
+            SESSIONS[sid] = {"login": shown, "expires": __import__("time").time() + 8 * 3600}
             if RECEIVER["obj"] is not None:
                 RECEIVER["obj"].track(tracked_from_login(sid, login))
             cookie = self._cookie("oidc_session", sid, max_age=8 * 3600)
@@ -265,6 +284,8 @@ class Demo(BaseHTTPRequestHandler):
         sid, _session = self._session()
         if sid:
             SESSIONS.pop(sid, None)
+            if Demo.rp is not None:
+                Demo.rp.forget_session(sid)
             if RECEIVER["obj"] is not None:
                 RECEIVER["obj"].untrack(sid)
         self._redirect(303, "/", cookies=[self._cookie("oidc_session", "", max_age=0)])
@@ -321,15 +342,14 @@ def _start_receiver(rp):
             RECEIVER["state"] = "not configured (signals are off)"
         return
     ssf = rp.config["ssf"]
-
-    def headers():
-        creds = rp.client_credentials("ssf.manage")
-        return {"authorization": f"Bearer {creds['access_token']}"}
-
+    # relying_party: every call to the transmitter carries the client-credentials token for
+    # ssf.manage, with a DPoP proof when that token is DPoP-bound, and an ended session's tokens
+    # leave the relying party's session token cache.
     receiver = SignalsReceiver(
         transmitter=ssf["transmitter"],
         tls=rp.tls(),
-        headers=headers,
+        relying_party=rp,
+        scope="ssf.manage",
         description=f"oidc-caep-risc demo ({rp.config['clientId']})",
         poll_interval_ms=ssf.get("pollIntervalMs") or 5000,
         on_end_sessions=lambda ids, event: _end_many(ids),
@@ -352,6 +372,10 @@ def _remember_event(event):
 def _end_many(ids):
     for sid in ids:
         SESSIONS.pop(sid, None)
+        if Demo.rp is not None:
+            Demo.rp.forget_session(sid)
+        if RECEIVER["obj"] is not None:
+            RECEIVER["obj"].untrack(sid)
 
 
 def main(argv=None):

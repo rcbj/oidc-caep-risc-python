@@ -12,8 +12,8 @@ Python 3.11 or later. The dependency is `cryptography`.
 
 | Path | What it is |
 |---|---|
-| `src/oidc_caep_risc` | The library. Source is `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `ssf/`. |
-| `tests` | pytest. A stub provider and a stub transmitter. `test_trust_chain.py`: the install script writes the whole chain to `tlsCa`'s path, and the library trusts an HTTPS provider through that file. |
+| `src/oidc_caep_risc` | The library. Source is `relying_party.py`, `client_auth.py`, `id_token.py`, `pkce.py`, `discovery.py`, `config.py`, `dpop.py`, `session_cache.py`, `ssf/`. |
+| `tests` | pytest. A stub provider and a stub transmitter. `test_client_profile.py` covers issue #16 point by point against the stub provider (which verifies DPoP proofs with `check_proof`). `test_trust_chain.py`: the install script writes the whole chain to `tlsCa`'s path, and the library trusts an HTTPS provider through that file. |
 | `demo` | `demo/app.py` and `demo/public/`. Config is `demo/oidc.json`. |
 | `scripts` | `configure_iya_sts.py` registers the confidential client and writes the listener CA trust chain to the file `tlsCa` names. `trust_chain.py` holds `save_trust_chain()` and refreshes that file. Scripts never print a secret: a generated password goes to `demo/generated/<user>.password` and the client secret to `secretFile`'s file, each created 0600; no trace line carries a URL or value derived from a password; secrets reach `docker run` as `-e NAME`; every `ssl.SSLContext` sets `minimum_version = TLSv1_2`. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose uses host networking. |
@@ -28,7 +28,21 @@ request = rp.authorize()
 who = rp.complete(query, request)
 ```
 
-Keep the transaction (`state`, nonce, code verifier) until the browser returns. Tokens stay in this process.
+Keep the transaction (`state`, nonce, code verifier, and `acr_values` when requested) until the browser returns. Tokens stay in this process.
+
+## Client profile (issue #16)
+
+The same settings and defaults are in all seven `oidc-caep-risc` libraries; README's *Settings and defaults* is the table. Keep the JSON key names identical to the siblings.
+
+- `config.apply_defaults()` holds every default and the redirect-URI rule. `resolve_config`, `RelyingParty.create` and `RelyingParty.__init__` all call it, so a client built directly gets what a file gets. Do not add a default anywhere else.
+- Redirect URIs: https, or http on `localhost`, `127.0.0.1`, `[::1]`. `allowInsecure` relaxes only the provider's endpoints, never a redirect URI. `authorize(redirect_uri=...)` is held to the same rule.
+- `par` and `dpop` are `auto`/`always`/`never`. Both are decided in `__init__` (`_par_decision`, `_dpop_key`), so a misconfiguration fails at creation. `discovery.py` keeps `require_pushed_authorization_requests` and `dpop_signing_alg_values_supported`.
+- DPoP lives in `dpop.py` (`DPoPKey`: the ES256 key, proofs, the RFC 7638 thumbprint for `dpop_jkt`, the latest `DPoP-Nonce` per origin). `_form` (PAR and token) and `resource_request` (UserInfo, the SSF transmitter) send proofs and retry a nonce challenge once. `_token` refuses a `token_type` that does not match whether a proof was sent. `backchannel.send()` returns response headers for this.
+- The SSF receiver takes `relying_party=`; with it every transmitter call goes through `rp.resource_request` with the client-credentials token, and an ended session is also removed from `rp.sessions`.
+- ID tokens: `idTokenSigningAlgs` default `["RS256"]`, intersected with the advertised list; `none` never; HMAC only when named. `requireIdTokenTypAndAtHash` (default true) makes `typ` and `at_hash` required (UserInfo JWTs are not held to `typ`). `iat` beyond `clockToleranceSec` in the future is refused.
+- `acr`: requested values travel in the transaction; `complete()` requires a matching `acr`. `refresh()` does not check it.
+- `session_cache.py`: `SessionTokenStore` (get/set/delete) and the default `MemorySessionTokenStore`. `complete(session_id=)`, `remember_session`, `access_token_for` (30 s floor, refresh on demand, entry removed on failure), `forget_session`.
+- The demo keeps its tokens only in that cache and gives the receiver the relying party. `scripts/configure_iya_sts.py` registers `oauthIdTokenSignedResponseAlg: RS256`.
 
 ## Tests
 

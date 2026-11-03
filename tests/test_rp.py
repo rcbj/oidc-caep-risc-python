@@ -45,8 +45,11 @@ _CLIENT_PEM = _CLIENT.private_bytes(
 _CLIENT_PUBLIC = _CLIENT.public_key()
 
 
-def _id_token(payload, corrupt=False):
-    header = b64url_encode(json.dumps({"alg": "RS256", "kid": "op", "typ": "JWT"}, separators=(",", ":")).encode())
+def _id_token(payload, corrupt=False, typ="JWT", alg="RS256"):
+    head = {"alg": alg, "kid": "op"}
+    if typ is not None:
+        head["typ"] = typ
+    header = b64url_encode(json.dumps(head, separators=(",", ":")).encode())
     body = b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
     signature = _PRIVATE.sign(f"{header}.{body}".encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
     sig = b64url_encode(signature)
@@ -75,6 +78,41 @@ def _client_ok(assertion, audience):
     return payload.get("iss") == CLIENT and payload.get("sub") == CLIENT and audience in audiences
 
 
+def _b64json(part):
+    return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+
+
+def check_proof(header, method, url, access_token=None):
+    """Verifies a DPoP proof the way an RFC 9449 server does, and returns header, payload, jkt."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+    parts = header.split(".")
+    assert len(parts) == 3, "not a compact JWS"
+    head = _b64json(parts[0])
+    payload = _b64json(parts[1])
+    assert head.get("typ") == "dpop+jwt", f"typ {head.get('typ')}"
+    assert head.get("alg") == "ES256", f"alg {head.get('alg')}"
+    jwk = head.get("jwk") or {}
+    assert jwk.get("kty") == "EC" and jwk.get("crv") == "P-256", "jwk"
+    assert "d" not in jwk, "the jwk header carries the private key"
+    x = int.from_bytes(base64.urlsafe_b64decode(jwk["x"] + "=="), "big")
+    y = int.from_bytes(base64.urlsafe_b64decode(jwk["y"] + "=="), "big")
+    key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+    signature = base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
+    assert verify_signature(key, "ES256", f"{parts[0]}.{parts[1]}".encode("ascii"), signature), "signature"
+    assert payload.get("htm") == method, f"htm {payload.get('htm')}"
+    assert payload.get("htu") == url, f"htu {payload.get('htu')} is not {url}"
+    assert isinstance(payload.get("jti"), str) and payload["jti"], "jti"
+    assert abs(payload.get("iat", 0) - time.time()) < 60, "iat"
+    if access_token is not None:
+        ath = b64url_encode(hashlib.sha256(access_token.encode()).digest())
+        assert payload.get("ath") == ath, "ath"
+    else:
+        assert "ath" not in payload, "ath on a token request"
+    canonical = json.dumps({k: jwk[k] for k in ("crv", "kty", "x", "y")}, separators=(",", ":"), sort_keys=True)
+    jkt = b64url_encode(hashlib.sha256(canonical.encode()).digest())
+    return {"header": head, "payload": payload, "jkt": jkt}
+
+
 class _Provider(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -87,6 +125,20 @@ def _start_provider():
         "aud": CLIENT,
         "exp": None,
         "bad_at_hash": False,
+        # Issue 16: what the stub advertises and how it answers.
+        "dpop_algs": None,
+        "require_par": False,
+        "id_token_algs": ["RS256"],
+        "dpop_nonce": None,
+        "rs_nonce": None,
+        "acr": None,
+        "typ": "JWT",
+        "omit_at_hash": False,
+        "iat_offset": 0,
+        "expires_in": 300,
+        "token_type": None,
+        "refresh_fails": False,
+        "seen": [],
     }
     codes = {}
     refresh = {}
@@ -103,7 +155,7 @@ def _start_provider():
             "end_session_endpoint": f"{stub['url']}/end-session",
             "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["RS256"],
+            "id_token_signing_alg_values_supported": list(stub["id_token_algs"]),
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "private_key_jwt"],
             "code_challenge_methods_supported": ["S256"],
             "authorization_response_iss_parameter_supported": True,
@@ -111,9 +163,13 @@ def _start_provider():
         }
         if stub["par"]:
             doc["pushed_authorization_request_endpoint"] = f"{stub['url']}/par"
+        if stub["require_par"]:
+            doc["require_pushed_authorization_requests"] = True
+        if stub["dpop_algs"] is not None:
+            doc["dpop_signing_alg_values_supported"] = list(stub["dpop_algs"])
         return doc
 
-    def token_for(row):
+    def token_for(row, proof=None):
         access_token = os.urandom(16).hex()
         refresh_token = os.urandom(16).hex()
         now = int(time.time())
@@ -122,7 +178,7 @@ def _start_provider():
             "sub": row["sub"],
             "aud": stub["aud"],
             "exp": stub["exp"] if stub["exp"] is not None else now + 300,
-            "iat": stub["exp"] if stub["exp"] else now,
+            "iat": stub["exp"] if stub["exp"] else now + stub["iat_offset"],
             "nonce": row["nonce"],
             "email": row["email"],
             "name": "Demo User",
@@ -130,17 +186,21 @@ def _start_provider():
             "sid": row["sid"],
             "at_hash": "aaaa" if stub["bad_at_hash"] else hash_claim(access_token, "RS256"),
         }
-        token = _id_token(payload, stub["corrupt"])
+        if stub["omit_at_hash"]:
+            payload.pop("at_hash")
+        if stub["acr"] is not None:
+            payload["acr"] = stub["acr"]
+        token = _id_token(payload, stub["corrupt"], typ=stub["typ"])
         refresh[refresh_token] = row
-        access[access_token] = payload
+        access[access_token] = {**payload, "_jkt": proof["jkt"] if proof else None}
         stub["aud"] = CLIENT
         stub["corrupt"] = False
         stub["bad_at_hash"] = False
         stub["exp"] = None
         return {
             "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 300,
+            "token_type": stub["token_type"] or ("DPoP" if proof else "Bearer"),
+            "expires_in": stub["expires_in"],
             "refresh_token": refresh_token,
             "id_token": token,
             "scope": SCOPES,
@@ -150,13 +210,28 @@ def _start_provider():
         def log_message(self, fmt, *args):
             return
 
-        def _json(self, status, body):
+        def _json(self, status, body, headers=None):
             raw = json.dumps(body).encode()
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(raw)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(raw)
+
+        def _proof(self, path, access_token=None):
+            """Checks a DPoP header. None when absent; raises AssertionError when malformed."""
+            header = self.headers.get("dpop")
+            if not header:
+                stub["seen"].append({"path": path, "proof": None})
+                return None
+            proof = check_proof(header, self.command, f"{stub['url']}{path}", access_token)
+            stub["seen"].append({"path": path, "proof": proof})
+            return proof
+
+        def _needs_nonce(self, proof, wanted):
+            return proof is not None and wanted is not None and proof["payload"].get("nonce") != wanted
 
         def _authorized(self, body):
             header = self.headers.get("authorization") or ""
@@ -183,15 +258,41 @@ def _start_provider():
             if path == "/jwks":
                 return self._json(200, {"keys": [_JWK]})
             if path == "/userinfo":
-                token = (self.headers.get("authorization") or "").removeprefix("Bearer ").strip()
-                claims = access.get(token)
-                return self._json(200, claims) if claims else self._json(401, {"error": "invalid_token"})
+                authorization = self.headers.get("authorization") or ""
+                scheme, _, token = authorization.partition(" ")
+                claims = access.get(token.strip())
+                if not claims:
+                    return self._json(401, {"error": "invalid_token"})
+                if claims["_jkt"]:
+                    if scheme != "DPoP":
+                        return self._json(401, {"error": "invalid_token"})
+                    try:
+                        proof = self._proof(path, token.strip())
+                    except AssertionError as err:
+                        return self._json(401, {"error": "invalid_dpop_proof", "error_description": str(err)})
+                    if proof is None or proof["jkt"] != claims["_jkt"]:
+                        return self._json(401, {"error": "invalid_dpop_proof"})
+                    if self._needs_nonce(proof, stub["rs_nonce"]):
+                        return self._json(401, {"error": "use_dpop_nonce"}, {
+                            "WWW-Authenticate": 'DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof"',
+                            "DPoP-Nonce": stub["rs_nonce"],
+                        })
+                elif scheme != "Bearer":
+                    return self._json(401, {"error": "invalid_token"})
+                return self._json(200, {key: value for key, value in claims.items() if not key.startswith("_")})
             if path == "/par" and self.command == "POST":
                 if not self._authorized(text):
                     return self._json(401, {"error": "invalid_client"})
+                try:
+                    proof = self._proof(path)
+                except AssertionError as err:
+                    return self._json(400, {"error": "invalid_dpop_proof", "error_description": str(err)})
+                if self._needs_nonce(proof, stub["dpop_nonce"]):
+                    return self._json(400, {"error": "use_dpop_nonce"}, {"DPoP-Nonce": stub["dpop_nonce"]})
                 params = parse_qs(text, keep_blank_values=True)
                 request_uri = "urn:par:" + os.urandom(8).hex()
                 pushed[request_uri] = params
+                stub["pushed"] = params
                 return self._json(201, {"request_uri": request_uri, "expires_in": 60})
             if path == "/authorize":
                 query = parse_qs(url.query, keep_blank_values=True)
@@ -199,6 +300,9 @@ def _start_provider():
                 params = pushed.get(stored) if stored else query
                 if not params:
                     return self._json(400, {"error": "invalid_request"})
+                if stub["require_par"] and not stored:
+                    return self._json(400, {"error": "invalid_request", "error_description": "PAR is required"})
+                stub["authorize_params"] = params
                 redirect = (params.get("redirect_uri") or [""])[0]
                 state = (params.get("state") or [""])[0]
                 challenge = (params.get("code_challenge") or [""])[0]
@@ -219,21 +323,29 @@ def _start_provider():
             if path == "/token" and self.command == "POST":
                 if not self._authorized(text):
                     return self._json(401, {"error": "invalid_client", "error_description": "client authentication failed"})
+                try:
+                    proof = self._proof(path)
+                except AssertionError as err:
+                    return self._json(400, {"error": "invalid_dpop_proof", "error_description": str(err)})
+                if self._needs_nonce(proof, stub["dpop_nonce"]):
+                    return self._json(400, {"error": "use_dpop_nonce"}, {"DPoP-Nonce": stub["dpop_nonce"]})
                 params = parse_qs(text, keep_blank_values=True)
                 grant = (params.get("grant_type") or [""])[0]
                 if grant == "client_credentials":
                     return self._json(200, {
                         "access_token": "cc-token",
-                        "token_type": "Bearer",
+                        "token_type": stub["token_type"] or ("DPoP" if proof else "Bearer"),
                         "expires_in": 120,
                         "scope": (params.get("scope") or [""])[0],
                     })
                 if grant == "refresh_token":
+                    if stub["refresh_fails"]:
+                        return self._json(400, {"error": "invalid_grant"})
                     row = refresh.get((params.get("refresh_token") or [""])[0])
                     if not row:
                         return self._json(400, {"error": "invalid_grant"})
-                    minted = token_for(row)
-                    claims = dict(access[minted["access_token"]])
+                    minted = token_for(row, proof)
+                    claims = {key: value for key, value in access[minted["access_token"]].items() if not key.startswith("_")}
                     claims.pop("nonce", None)
                     minted["id_token"] = _id_token(claims)
                     return self._json(200, minted)
@@ -248,7 +360,7 @@ def _start_provider():
                 if got != row["challenge"]:
                     return self._json(400, {"error": "invalid_grant", "error_description": "pkce"})
                 del codes[code]
-                return self._json(200, token_for(row))
+                return self._json(200, token_for(row, proof))
             return self._json(404, {"error": "not_found"})
 
         def do_GET(self):
