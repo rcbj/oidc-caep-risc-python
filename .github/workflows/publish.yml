@@ -11,17 +11,24 @@ on:
 permissions:
   contents: read
 
+# One release at a time: each reads the version the one before it took.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
-    # The test workflow has already succeeded for this commit on main.
-    # Publish only when that commit is a pull request merged into main.
-    # A direct push stays unpublished. The checkout is the commit the
-    # tests ran, and a version already on PyPI is left there.
+    # The test workflow has already succeeded for this commit on main. Release
+    # only when that commit is a pull request merged into main; a direct push
+    # stays unreleased. .github/scripts/release_decision.py picks the version:
+    # VERSION when it is ahead of what is published, one patch higher when the
+    # shipped files changed since the last release's tag, and otherwise no
+    # release at all, so a change to tests, the demo, or the docs ships nothing.
+    # The version is written into this workspace only and is never committed.
     #
-    # There is no API token. PyPI Trusted Publishing trades this job's
-    # GitHub OIDC token for a short-lived upload token. PyPI must hold a
-    # publisher for this repository, publish.yml and the environment
-    # pypi.
+    # There is no API token. PyPI Trusted Publishing trades this job's GitHub
+    # OIDC token for a short-lived upload token. PyPI must hold a publisher for
+    # this repository, publish.yml and the environment pypi.
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
@@ -31,7 +38,7 @@ jobs:
       name: pypi
       url: https://pypi.org/project/oidc-caep-risc/
     permissions:
-      contents: read
+      contents: write
       pull-requests: read
       id-token: write
     steps:
@@ -53,34 +60,29 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Every tag: the last release's tag is what the decision compares with.
       - uses: actions/checkout@v4
         if: steps.gate.outputs.publish == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Build the sdist and the wheel
-        id: build
+      - name: Decide whether this commit is a release
+        id: decide
         if: steps.gate.outputs.publish == 'true'
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python3 .github/scripts/release_decision.py decide pypi oidc-caep-risc "$SHA" src pyproject.toml
+
+      - name: Build the sdist and the wheel
+        if: steps.decide.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           set -eu
-          python3 - <<'PY'
-          import json, os, tomllib, urllib.error, urllib.request
-          project = tomllib.load(open("pyproject.toml", "rb"))["project"]
-          name, version = project["name"], project["version"]
-          url = "https://pypi.org/pypi/%s/%s/json" % (name, version)
-          try:
-              urllib.request.urlopen(url)
-              exists = True
-          except urllib.error.HTTPError as e:
-              if e.code != 404:
-                  raise SystemExit("PyPI returned %d for %s %s" % (e.code, name, version))
-              exists = False
-          if exists:
-              print("%s %s is already on PyPI." % (name, version))
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write("upload=%s\n" % ("false" if exists else "true"))
-          PY
+          python3 .github/scripts/release_decision.py stamp pypi "$VERSION"
           docker run --rm \
             -v "$PWD":/src \
             -w /src \
@@ -89,7 +91,18 @@ jobs:
           ls -l dist
 
       - name: Upload to PyPI
-        if: steps.build.outputs.upload == 'true'
+        if: steps.decide.outputs.release == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+      # Publishing and this step are one release: the tag it creates is the
+      # baseline the next decision compares with.
+      - name: Create the tag and the GitHub Release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SHA" --title "$TAG" --generate-notes
