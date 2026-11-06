@@ -66,7 +66,7 @@ def _start_transmitter():
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(raw)))
             for name, value in (headers or {}).items():
-                self.send_header(name, value)
+                self.send_header(name, value.replace("\r", "").replace("\n", ""))
             self.end_headers()
             if raw:
                 self.wfile.write(raw)
