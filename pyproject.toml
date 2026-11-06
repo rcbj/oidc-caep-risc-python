@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 [project]
 name = "oidc-caep-risc"
-version = "0.2.0"
+version = "0.2.1"
 description = "Server-side OpenID Connect confidential client: Authorization Code with PKCE, client authentication, and a CAEP and RISC Shared Signals receiver."
 readme = "README.md"
 license = "MIT"
