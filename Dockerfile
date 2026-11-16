@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # `docker build --target test` runs the suite in this image.
 # The demo image below does not run it.
-FROM python:3.11-slim AS test
+FROM python:3.15-slim AS test
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE VERSION ./
 COPY src src
@@ -11,7 +11,7 @@ COPY scripts scripts
 COPY demo/oidc.json demo/oidc.json
 RUN pip install --no-cache-dir ".[dev]" && pytest
 
-FROM python:3.11-slim
+FROM python:3.15-slim
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE VERSION ./
 COPY src src
